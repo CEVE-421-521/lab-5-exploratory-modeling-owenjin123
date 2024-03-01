@@ -1,6 +1,6 @@
 ---
 title: "Lab 5: Sea-Level Rise"
-author: "<Your Name (NetID)>"
+author: "<Owen Jin (owj1)>"
 jupyter: julia-1.10
 date: 2024-02-16
 
@@ -9,18 +9,18 @@ format:
 
     # YOU DO NOT NEED BOTH PDF AND DOCX.
     # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
-    pdf:
-        documentclass: article
-        fontsize: 11pt
-        geometry:
-            - margin=1in  
-        number-sections: true
-        code-line-numbers: true
-    #docx: 
-    #    toc: true
-    #    fig-format: png
+    #pdf:
+    #    documentclass: article
+    #    fontsize: 11pt
+    #    geometry:
+    #        - margin=1in  
     #    number-sections: true
     #    code-line-numbers: true
+    docx: 
+        toc: true
+        fig-format: png
+        number-sections: true
+        code-line-numbers: true
 
 date-format: "ddd., MMM. D"
 bibliography: references.bib
@@ -60,3 +60,185 @@ Plots.default(; margin=5Plots.mm)
 using Revise
 using HouseElevation
 ```
+
+```{julia}
+house = let
+    haz_fl_dept = CSV.read("data/haz_fl_dept.csv", DataFrame) # read in the file
+    desc = "one & 1/2 story, no basement, Contents"
+    row = @rsubset(haz_fl_dept, :Source == "USACE - Galveston", :Description == desc)[1, :] # select the row I want
+    area = 2039u"ft^2"
+    height_above_gauge = 8u"ft"
+    House(
+        row;
+        area=area,
+        height_above_gauge=height_above_gauge,
+        value_usd=455_000,
+    )
+end
+```
+
+```{julia}
+let
+    depths = uconvert.(u"ft", (-7.0u"ft"):(1.0u"inch"):(30.0u"ft"))
+    damages = house.ddf.(depths) ./ 100
+    damages_1000_usd = damages .* house.value_usd ./ 1000
+    scatter(
+        depths,
+        damages_1000_usd;
+        xlabel="Flood Depth",
+        ylabel="Damage (Thousand USD)",
+        label="$(house.description)\n($(house.source))",
+        legend=:bottomright,
+        size=(800, 400),
+        yformatter=:plain, # prevents scientific notation
+    )
+end
+```
+I got the area and value from a listing Galveston listing on Zillow that matched the description.
+
+```{julia}
+elevation_cost(house, 10u"ft")
+```
+
+```{julia}
+let
+    elevations = 0u"ft":0.25u"ft":14u"ft"
+    costs = [elevation_cost(house, eᵢ) for eᵢ in elevations]
+    scatter(
+        elevations,
+        costs ./ 1_000;
+        xlabel="Elevation",
+        ylabel="Cost (Thousand USD)",
+        label="$(house.description)\n($(house.source))",
+        legend=:bottomright,
+        size=(800, 400),
+        yformatter=:plain, # prevents scientific notation
+    )
+end
+```
+
+```{julia}
+slr_scenarios = let
+    df = CSV.read("data/slr_oddo.csv", DataFrame)
+    [Oddo17SLR(a, b, c, tstar, cstar) for (a, b, c, tstar, cstar) in eachrow(df)]
+end
+println("There are $(length(slr_scenarios)) parameter sets")
+```
+
+```{julia}
+let
+    years = 1900:2150
+    p = plot(;
+        xlabel="Year",
+        ylabel="Mean sea-level (ft)\nwith respect to the year 2000",
+        label="Oddo et al. (2017)",
+        legend=false
+    )
+    for s in rand(slr_scenarios, 250)
+        plot!(p, years, s.(years); color=:lightgrey, alpha=0.5, linewidth=0.5)
+    end
+    p
+end
+```
+
+```{julia}
+function draw_surge_distribution()
+    μ = rand(Normal(5, 1))
+    σ = rand(Exponential(1.5))
+    ξ = rand(Normal(0.1, 0.05))
+    GeneralizedExtremeValue(μ, σ, ξ)
+end
+[draw_surge_distribution() for _ in 1:1000]
+```
+
+```{julia}
+function draw_discount_rate()
+    return rand(Normal(0.04, 0.02))
+end
+```
+
+```{julia}
+p = ModelParams(
+    house=house,
+    years=2024:2100
+)
+
+sow = SOW(
+    rand(slr_scenarios),
+    draw_surge_distribution(),
+    draw_discount_rate()
+)
+
+a = Action(3.0u"ft")
+
+res = run_sim(a, sow, p)
+```
+
+```{julia}
+sows = [SOW(rand(slr_scenarios), draw_surge_distribution(), draw_discount_rate()) for _ in 1:10] # for 10 SOWs
+actions = [Action(3.0u"ft") for _ in 1:10] # these are all the same
+results = [run_sim(a, s, p) for (a, s) in zip(actions, sows)]
+```
+
+```{julia}
+
+action_heights = [0.0, 3.0, 6.0, 9.0, 12.0]
+all_sows = []
+
+for height in action_heights
+    sows = [SOW(rand(slr_scenarios), draw_surge_distribution(), draw_discount_rate()) for _ in 1:10]
+    append!(all_sows, sows)
+end
+
+actions = [Action(height * u"ft") for height in action_heights for _ in 1:10]
+
+results = [run_sim(a, s, p) for (a, s) in zip(actions, all_sows)]
+
+```
+
+```{julia}
+df = DataFrame(
+    npv=results,
+    Δh_ft=[a.Δh_ft for a in actions],
+    slr_a=[s.slr.a for s in all_sows],
+    slr_b=[s.slr.b for s in all_sows],
+    slr_c=[s.slr.c for s in all_sows],
+    slr_tstar=[s.slr.tstar for s in all_sows],
+    slr_cstar=[s.slr.cstar for s in all_sows],
+    surge_μ=[s.surge_dist.μ for s in all_sows],
+    surge_σ=[s.surge_dist.σ for s in all_sows],
+    surge_ξ=[s.surge_dist.ξ for s in all_sows],
+    discount_rate=[s.discount_rate for s in all_sows],
+)
+
+
+```
+
+```{julia}
+scatter(df.Δh_ft, df.npv, xlabel="Action Height (Δh_ft)", ylabel="Net Present Value (NPV)", title="NPV vs Action Height")
+```
+```{julia}
+scatter(df.surge_μ, df.npv, xlabel="Surge Distribution Parameter (μ)", ylabel="Net Present Value (NPV)", title="NPV vs Surge μ")
+```
+
+```{julia}
+scatter(df.surge_σ, df.npv, xlabel="Surge Distribution Parameter (σ)", ylabel="Net Present Value (NPV)", title="NPV vs Surge σ")
+```
+
+```{julia}
+scatter(df.surge_ξ, df.npv, xlabel="Surge Distribution Parameter (ξ)", ylabel="Net Present Value (NPV)", title="NPV vs Surge ξ")
+```
+```{julia}
+scatter(df.discount_rate, df.npv, xlabel="Discount Rate", ylabel="Net Present Value (NPV)", title="NPV vs Discount Rate")
+```
+
+When do you get the best results?
+When sea level rise, surge levels are minimized and damage is prevented by elevating the house. The discount rate also needs to be favorable.
+
+When do you get the worst results?
+The worst results are when there is more sea level rise and higher surge that overcomes actions taken.
+
+What are the most important parameters?
+The decision of elevating/how high to elevate and the discount rate. 
+If you had unlimited computing power, would you run more simulations? How many?
+More simulations are helpful for eliminating bias, but once its significant ~100 simulations, there won't be large variations in the final outcome.
